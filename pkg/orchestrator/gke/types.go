@@ -131,16 +131,23 @@ type gkeAccelerator struct {
 	AcceleratorType  string      `json:"acceleratorType"`
 }
 
+type gkeAdvancedMachineFeatures struct {
+	ThreadsPerCore string `json:"threadsPerCore"`
+}
+
 type gkeNodePoolConfig struct {
-	ServiceAccount string           `json:"serviceAccount"`
-	MachineType    string           `json:"machineType"`
-	Accelerators   []gkeAccelerator `json:"accelerators"`
+	ServiceAccount          string                     `json:"serviceAccount"`
+	MachineType             string                     `json:"machineType"`
+	Accelerators            []gkeAccelerator           `json:"accelerators"`
+	AdvancedMachineFeatures gkeAdvancedMachineFeatures `json:"advancedMachineFeatures"`
 }
 
 type gkeAutoscaling struct {
-	Enabled      bool `json:"enabled"`
-	MinNodeCount int  `json:"minNodeCount"`
-	MaxNodeCount int  `json:"maxNodeCount"`
+	Enabled           bool `json:"enabled"`
+	MinNodeCount      int  `json:"minNodeCount"`
+	MaxNodeCount      int  `json:"maxNodeCount"`
+	TotalMinNodeCount int  `json:"totalMinNodeCount"`
+	TotalMaxNodeCount int  `json:"totalMaxNodeCount"`
 }
 
 type gkeJobNodePool struct {

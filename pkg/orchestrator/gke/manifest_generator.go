@@ -94,6 +94,12 @@ func (g *GKEOrchestrator) buildResourcesString(cpu, mem, gpu, tpu string) string
 }
 
 func (g *GKEOrchestrator) PrepareManifestOptions(job orchestrator.JobDefinition, fullImageName string) (ManifestOptions, JobProfile, error) {
+	if len(g.clusterDesc.NodePools) == 0 {
+		if err := g.populateClusterMetadata(&job); err != nil {
+			return ManifestOptions{}, JobProfile{}, fmt.Errorf("failed to populate cluster metadata: %w", err)
+		}
+	}
+
 	if err := g.resolveAcceleratorShorthand(&job); err != nil {
 		return ManifestOptions{}, JobProfile{}, err
 	}

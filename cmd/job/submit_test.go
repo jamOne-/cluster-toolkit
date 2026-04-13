@@ -197,6 +197,12 @@ func (m *mockExecutorForTest) ExecuteCommand(name string, args ...string) shell.
 			Stdout:   `{"guestCpus": 4}`,
 		}
 	}
+	if name == "gcloud" && len(args) > 3 && args[0] == "container" && args[1] == "clusters" && args[2] == "describe" {
+		return shell.CommandResult{
+			ExitCode: 0,
+			Stdout:   `{"locations": ["us-central1-a"], "nodePools": [{"name": "default-pool"}]}`,
+		}
+	}
 	return shell.CommandResult{ExitCode: 1, Stderr: "unhandled mock command"}
 }
 

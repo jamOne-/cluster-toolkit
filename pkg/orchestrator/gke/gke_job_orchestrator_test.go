@@ -166,6 +166,7 @@ func TestGenerateGKEManifest_Accelerators(t *testing.T) {
 				"kubectl get nodes":           {{ExitCode: 0, Stdout: ""}},
 			}
 			orc := &GKEOrchestrator{executor: NewMockExecutor(mockResponses)}
+			orc.clusterDesc.NodePools = []gkeJobNodePool{{Name: "default-pool"}}
 
 			opts, profile, err := orc.PrepareManifestOptions(job, "test-image:latest")
 			if err != nil {
@@ -221,6 +222,7 @@ func TestGenerateGKEManifest_Volumes(t *testing.T) {
 		},
 	}
 
+	orc.clusterDesc.NodePools = []gkeJobNodePool{{Name: "default-pool"}}
 	opts, profile, err := orc.PrepareManifestOptions(job, "test-image:latest")
 	if err != nil {
 		t.Fatalf("prepareManifestOptions failed: %v", err)
@@ -335,6 +337,7 @@ func TestGeneratePathwaysManifest(t *testing.T) {
 	}
 
 	orc := NewGKEOrchestrator()
+	orc.clusterDesc.NodePools = []gkeJobNodePool{{Name: "default-pool"}}
 	manifest, err := orc.GeneratePathwaysManifest(job, "test-image:latest")
 	if err != nil {
 		t.Fatalf("generatePathwaysManifest failed: %v", err)
@@ -504,6 +507,189 @@ func TestFetchMachineCapacity(t *testing.T) {
 		})
 	}
 }
+func TestProcessNodePoolCapacity_Hyperthreading(t *testing.T) {
+	tests := []struct {
+		name          string
+		np            gkeJobNodePool
+		mockResponses map[string][]shell.CommandResult
+		wantCpus      int
+		wantErr       bool
+	}{
+		{
+			name: "x86 with hyperthreading disabled",
+			np: gkeJobNodePool{
+				Config: gkeNodePoolConfig{
+					MachineType: "c2-standard-60",
+					AdvancedMachineFeatures: gkeAdvancedMachineFeatures{
+						ThreadsPerCore: "1",
+					},
+				},
+				InitialNodeCount: 1,
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"gcloud compute machine-types describe c2-standard-60 --zone=us-central1-a --format=json": {
+					{ExitCode: 0, Stdout: `{"guestCpus": 60, "memoryMb": 240000}`},
+				},
+			},
+			wantCpus: 30, // Halved!
+			wantErr:  false,
+		},
+		{
+			name: "x86 with hyperthreading enabled",
+			np: gkeJobNodePool{
+				Config: gkeNodePoolConfig{
+					MachineType: "c2-standard-60",
+					AdvancedMachineFeatures: gkeAdvancedMachineFeatures{
+						ThreadsPerCore: "2",
+					},
+				},
+				InitialNodeCount: 1,
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"gcloud compute machine-types describe c2-standard-60 --zone=us-central1-a --format=json": {
+					{ExitCode: 0, Stdout: `{"guestCpus": 60, "memoryMb": 240000}`},
+				},
+			},
+			wantCpus: 60, // Not halved!
+			wantErr:  false,
+		},
+		{
+			name: "ARM64 with threadsPerCore=1",
+			np: gkeJobNodePool{
+				Config: gkeNodePoolConfig{
+					MachineType: "t2a-standard-16",
+					AdvancedMachineFeatures: gkeAdvancedMachineFeatures{
+						ThreadsPerCore: "1",
+					},
+				},
+				InitialNodeCount: 1,
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"gcloud compute machine-types describe t2a-standard-16 --zone=us-central1-a --format=json": {
+					{ExitCode: 0, Stdout: `{"guestCpus": 16, "memoryMb": 64000}`},
+				},
+			},
+			wantCpus: 16, // Not halved because it's ARM!
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExecutor := NewMockExecutor(tt.mockResponses)
+			orc := &GKEOrchestrator{executor: mockExecutor}
+
+			cpus, _, _, _, _, _, _, err := orc.processNodePoolCapacity(tt.np, "us-central1-a")
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("Expected error, but got nil")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if cpus != tt.wantCpus {
+					t.Errorf("Expected cpus %d, got %d", tt.wantCpus, cpus)
+				}
+			}
+		})
+	}
+}
+
+func TestDetermineIfCPUMachine_Hyperthreading(t *testing.T) {
+	tests := []struct {
+		name          string
+		job           orchestrator.JobDefinition
+		clusterDesc   gkeCluster
+		mockResponses map[string][]shell.CommandResult
+		wantIsCPU     bool
+		wantCapacity  int
+		wantErr       bool
+	}{
+		{
+			name: "x86 with hyperthreading disabled in clusterDesc",
+			job: orchestrator.JobDefinition{
+				AcceleratorType: "c2-standard-60",
+				ClusterLocation: "us-central1-a",
+			},
+			clusterDesc: gkeCluster{
+				NodePools: []gkeJobNodePool{
+					{
+						Config: gkeNodePoolConfig{
+							MachineType: "c2-standard-60",
+							AdvancedMachineFeatures: gkeAdvancedMachineFeatures{
+								ThreadsPerCore: "1",
+							},
+						},
+					},
+				},
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"gcloud compute machine-types describe c2-standard-60 --zone=us-central1-a --format=json": {
+					{ExitCode: 0, Stdout: `{"guestCpus": 60, "memoryMb": 240000}`},
+				},
+			},
+			wantIsCPU:    true,
+			wantCapacity: 30, // Halved!
+			wantErr:      false,
+		},
+		{
+			name: "Fallback to Compute API when not in clusterDesc",
+			job: orchestrator.JobDefinition{
+				AcceleratorType: "c2-standard-60",
+				ClusterLocation: "us-central1-a",
+			},
+			clusterDesc: gkeCluster{
+				NodePools: []gkeJobNodePool{
+					{
+						Config: gkeNodePoolConfig{
+							MachineType: "other-machine",
+						},
+					},
+				},
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"gcloud compute machine-types describe c2-standard-60 --zone=us-central1-a --format=json": {
+					{ExitCode: 0, Stdout: `{"guestCpus": 60, "memoryMb": 240000}`},
+				},
+			},
+			wantIsCPU:    true,
+			wantCapacity: 60, // Not halved!
+			wantErr:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExecutor := NewMockExecutor(tt.mockResponses)
+			orc := &GKEOrchestrator{
+				executor:    mockExecutor,
+				clusterDesc: tt.clusterDesc,
+			}
+			orc.machineCapCache = make(map[string]MachineTypeCap)
+
+			isCPU, capacity, err := orc.determineIfCPUMachine(tt.job)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("Expected error, but got nil")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if isCPU != tt.wantIsCPU {
+					t.Errorf("Expected isCPU %t, got %t", tt.wantIsCPU, isCPU)
+				}
+				if capacity != tt.wantCapacity {
+					t.Errorf("Expected capacity %d, got %d", tt.wantCapacity, capacity)
+				}
+			}
+		})
+	}
+}
+
 func TestVerifySuperSlicingActive(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -860,6 +1046,7 @@ func TestGenerateGKEManifest_DynamicVmsPerSlice(t *testing.T) {
 		VmsPerSlice:     0,
 	}
 
+	orc.clusterDesc.NodePools = []gkeJobNodePool{{Name: "default-pool"}}
 	opts, profile, err := orc.PrepareManifestOptions(job, "test-image:latest")
 	if err != nil {
 		t.Fatalf("prepareManifestOptions failed: %v", err)
@@ -903,6 +1090,7 @@ func TestGenerateGKEManifest_RespectUserVmsPerSlice(t *testing.T) {
 		VmsPerSlice:     1, // Explicitly set to 1
 	}
 
+	orc.clusterDesc.NodePools = []gkeJobNodePool{{Name: "default-pool"}}
 	opts, profile, err := orc.PrepareManifestOptions(job, "test-image:latest")
 	if err != nil {
 		t.Fatalf("prepareManifestOptions failed: %v", err)
@@ -988,5 +1176,51 @@ func TestResolveTopologyForChips(t *testing.T) {
 				t.Errorf("resolveTopologyForChips() got = %v, want %v", got, tt.wantShape)
 			}
 		})
+	}
+}
+
+func TestConfigureClusterEnvironment_AutoCreateQueues(t *testing.T) {
+	responses := map[string][]shell.CommandResult{
+		"kubectl get localqueue default-queue -n default": {
+			{ExitCode: 1, Stderr: "Error from server (NotFound): localqueues.kueue.x-k8s.io \"default-queue\" not found"},
+		},
+		"kubectl apply -f": {
+			{ExitCode: 0, Stdout: "resourceflavor.kueue.x-k8s.io/flavor-default created"},
+			{ExitCode: 0, Stdout: "clusterqueue.kueue.x-k8s.io/cluster-queue created"},
+			{ExitCode: 0, Stdout: "localqueue.kueue.x-k8s.io/default-queue created"},
+		},
+		"kubectl get localqueue default-queue -n default -o jsonpath={.spec.clusterQueue}": {
+			{ExitCode: 0, Stdout: "cluster-queue"},
+		},
+		"kubectl get clusterqueue cluster-queue -o json": {
+			{ExitCode: 0, Stdout: "{\"apiVersion\":\"kueue.x-k8s.io/v1beta1\",\"kind\":\"ClusterQueue\",\"spec\":{\"resourceGroups\":[{\"coveredResources\":[\"cpu\"]}]}}"},
+		},
+		"kubectl patch clusterqueue cluster-queue": {
+			{ExitCode: 0, Stdout: "clusterqueue.kueue.x-k8s.io/cluster-queue patched"},
+		},
+	}
+
+	mockExec := NewMockExecutor(responses)
+	orc := &GKEOrchestrator{
+		executor: mockExec,
+		capacity: ClusterCapacity{
+			Flavors: map[string]FlavorCapacity{
+				"flavor-default": {CPUs: 30},
+			},
+		},
+	}
+
+	job := &orchestrator.JobDefinition{
+		KueueQueueName: "default-queue",
+	}
+
+	err := orc.configureClusterEnvironment(job)
+	if err != nil {
+		t.Fatalf("configureClusterEnvironment failed: %v", err)
+	}
+
+	// Verify calls
+	if mockExec.callCount["kubectl apply -f"] != 3 {
+		t.Errorf("Expected 3 calls to kubectl apply -f, got %d", mockExec.callCount["kubectl apply -f"])
 	}
 }

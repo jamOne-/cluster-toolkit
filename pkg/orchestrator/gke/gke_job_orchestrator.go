@@ -126,6 +126,7 @@ type GKEOrchestrator struct {
 	clusterZones             []string
 	nodePoolSAs              []string
 	capacity                 ClusterCapacity
+	clusterDesc              gkeCluster
 	dynClient                dynamic.Interface
 	kubeClient               KubeClient
 	acceleratorToMachineType map[string]string
@@ -155,7 +156,6 @@ func (g *GKEOrchestrator) SetKubeClient(c KubeClient) {
 // SubmitJob submits a job to the GKE cluster. It processes the job definition,
 // creates the required Kubernetes manifests (JobSet), and applies them to the cluster.
 func (g *GKEOrchestrator) SubmitJob(job orchestrator.JobDefinition) error {
-	logging.Info("Starting gcluster job submit workflow...")
 
 	startTime := time.Now()
 	var success bool
@@ -284,7 +284,7 @@ func (g *GKEOrchestrator) ApplyManifest(manifestContent, outputManifestPath, wor
 	return nil
 }
 
-func (g *GKEOrchestrator) initializeJobSubmission(job *orchestrator.JobDefinition) error {
+func (g *GKEOrchestrator) populateClusterMetadata(job *orchestrator.JobDefinition) error {
 	projectID, err := g.getProjectID(job.ProjectID)
 	if err != nil {
 		return err
@@ -306,6 +306,7 @@ func (g *GKEOrchestrator) initializeJobSubmission(job *orchestrator.JobDefinitio
 	}
 
 	g.clusterZones = clusterDesc.Locations
+	g.clusterDesc = clusterDesc
 
 	capacity, nodePoolSAs, err := g.calculateClusterCapacity(clusterDesc, job.ClusterLocation)
 	if err != nil {
@@ -314,6 +315,13 @@ func (g *GKEOrchestrator) initializeJobSubmission(job *orchestrator.JobDefinitio
 	g.capacity = capacity
 	g.nodePoolSAs = nodePoolSAs
 	logging.Info("Calculated cluster capacity: %+v", g.capacity)
+	return nil
+}
+
+func (g *GKEOrchestrator) initializeJobSubmission(job *orchestrator.JobDefinition) error {
+	if err := g.populateClusterMetadata(job); err != nil {
+		return err
+	}
 
 	logging.Info("Configuring kubectl for GKE cluster '%s'...", job.ClusterName)
 	if err := g.configureKubectl(job.ClusterName, job.ClusterLocation, job.ProjectID); err != nil {
@@ -380,11 +388,7 @@ func (g *GKEOrchestrator) processNodePoolCapacity(np gkeJobNodePool, location st
 		sa = ""
 	}
 
-	nodeCount := np.InitialNodeCount
-	if np.Autoscaling.Enabled && np.Autoscaling.MaxNodeCount > nodeCount {
-		nodeCount = np.Autoscaling.MaxNodeCount
-	}
-
+	nodeCount := g.calculateNodeCount(np)
 	nodeLabels = make(map[string]string)
 
 	if nodeCount == 0 {
@@ -396,7 +400,13 @@ func (g *GKEOrchestrator) processNodePoolCapacity(np gkeJobNodePool, location st
 		return 0, 0, 0, 0, "flavor-default", nodeLabels, sa, err
 	}
 
-	cpus = cap.GuestCpus * nodeCount
+	guestCpus := cap.GuestCpus
+	// Check if hyperthreading is disabled. If threadsPerCore is "1", capacity is halved on x86 skip for arm64.
+	// TODO: Add future ARM machine types (apart from t2a, e.g. Axion) to the exempt condition here when supported.
+	if np.Config.AdvancedMachineFeatures.ThreadsPerCore == "1" && !strings.HasPrefix(np.Config.MachineType, "t2a") {
+		guestCpus = guestCpus / 2
+	}
+	cpus = guestCpus * nodeCount
 	memMb = cap.MemoryMb * nodeCount
 
 	flavor = "flavor-default"
@@ -409,24 +419,43 @@ func (g *GKEOrchestrator) processNodePoolCapacity(np gkeJobNodePool, location st
 	}
 
 	if len(np.Config.Accelerators) == 0 && len(cap.Accelerators) > 0 {
-		count := cap.Accelerators[0].Count
-		accType := cap.Accelerators[0].Type
-		if strings.Contains(strings.ToLower(accType), "tpu") {
-			tpus += count * nodeCount
-			flavor = "flavor-" + strings.ToLower(accType)
-			nodeLabels["cloud.google.com/gke-tpu-accelerator"] = accType
-		} else {
-			gpus += count * nodeCount
-			flavor = "flavor-" + strings.ToLower(accType)
-			nodeLabels["cloud.google.com/gke-accelerator"] = accType
-		}
-		if g.acceleratorToMachineType == nil {
-			g.acceleratorToMachineType = make(map[string]string)
-		}
-		g.acceleratorToMachineType[strings.ToLower(accType)] = np.Config.MachineType
+		gpus, tpus, flavor = g.processImplicitAccelerators(cap, nodeCount, np.Config.MachineType, nodeLabels)
 	}
 
 	return cpus, memMb, gpus, tpus, flavor, nodeLabels, sa, nil
+}
+
+func (g *GKEOrchestrator) calculateNodeCount(np gkeJobNodePool) int {
+	nodeCount := np.InitialNodeCount
+	maxNodes := np.Autoscaling.MaxNodeCount
+	if np.Autoscaling.TotalMaxNodeCount > maxNodes {
+		maxNodes = np.Autoscaling.TotalMaxNodeCount
+	}
+	if np.Autoscaling.Enabled && maxNodes > nodeCount {
+		nodeCount = maxNodes
+	}
+	return nodeCount
+}
+
+func (g *GKEOrchestrator) processImplicitAccelerators(cap MachineTypeCap, nodeCount int, machineType string, nodeLabels map[string]string) (gpus, tpus int, flavor string) {
+	count := cap.Accelerators[0].Count
+	accType := cap.Accelerators[0].Type
+	flavor = "flavor-" + strings.ToLower(accType)
+
+	if strings.Contains(strings.ToLower(accType), "tpu") {
+		tpus = count * nodeCount
+		nodeLabels["cloud.google.com/gke-tpu-accelerator"] = accType
+	} else {
+		gpus = count * nodeCount
+		nodeLabels["cloud.google.com/gke-accelerator"] = accType
+	}
+
+	if g.acceleratorToMachineType == nil {
+		g.acceleratorToMachineType = make(map[string]string)
+	}
+	g.acceleratorToMachineType[strings.ToLower(accType)] = machineType
+
+	return gpus, tpus, flavor
 }
 
 func (g *GKEOrchestrator) processAccelerators(accelerators []gkeAccelerator, nodeCount int, machineType string) (gpus, tpus int, flavor string, nodeLabels map[string]string, err error) {
@@ -468,10 +497,62 @@ func (g *GKEOrchestrator) configureClusterEnvironment(job *orchestrator.JobDefin
 		logging.Info("Warning: Failed to ensure ResourceFlavors: %v", err)
 	}
 
+	exists, err := g.checkLocalQueueExists(localQueue)
+	if err != nil {
+		logging.Info("Warning: Failed to check if LocalQueue exists: %v", err)
+	}
+	if !exists {
+		logging.Info("LocalQueue '%s' does not exist. Attempting to create default queues...", localQueue)
+		if err := g.createDefaultQueues(localQueue); err != nil {
+			logging.Info("Warning: Failed to create default queues: %v. Workload might remain suspended.", err)
+		}
+	}
+
 	if err := g.ensureClusterQueueCoverage(localQueue); err != nil {
 		logging.Info("Warning: Could not automatically update ClusterQueue: %v. Workload might remain suspended.", err)
 	}
 
+	return nil
+}
+
+func (g *GKEOrchestrator) checkLocalQueueExists(name string) (bool, error) {
+	res := g.executor.ExecuteCommand("kubectl", "get", "localqueue", name, "-n", "default")
+	if res.ExitCode == 0 {
+		return true, nil
+	}
+	if strings.Contains(res.Stderr, "NotFound") || strings.Contains(res.Stderr, "not found") {
+		return false, nil
+	}
+	return false, fmt.Errorf("failed to check localqueue status: %s", res.Stderr)
+}
+
+func (g *GKEOrchestrator) createDefaultQueues(localQueueName string) error {
+	logging.Info("Creating default ClusterQueue and LocalQueue...")
+
+	// Render and apply ClusterQueue
+	clusterQueueBytes, err := g.renderClusterQueue()
+	if err != nil {
+		return fmt.Errorf("failed to render clusterqueue: %w", err)
+	}
+	if err := g.applyManifests(clusterQueueBytes, "cluster-queue.yaml"); err != nil {
+		return fmt.Errorf("failed to apply clusterqueue: %w", err)
+	}
+
+	// Render and apply LocalQueue using raw string to avoid template dependency issues
+	localQueueManifest := fmt.Sprintf(`apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: %s
+  namespace: default
+spec:
+  clusterQueue: cluster-queue
+`, localQueueName)
+
+	if err := g.applyManifests([]byte(localQueueManifest), "local-queue.yaml"); err != nil {
+		return fmt.Errorf("failed to apply localqueue: %w", err)
+	}
+
+	logging.Info("Default queues created successfully.")
 	return nil
 }
 
@@ -481,13 +562,25 @@ func (g *GKEOrchestrator) ensureClusterQueueCoverage(localQueueName string) erro
 		return err
 	}
 
-	hasCoverage, err := g.checkClusterQueueCoverage(cqName)
+	hasCoverage, isEmpty, err := g.checkClusterQueueCoverage(cqName)
 	if err != nil {
 		return err
 	}
 
 	if hasCoverage {
 		logging.Info("Kueue ClusterQueue '%s' already covers CPU and Memory.", cqName)
+		return nil
+	}
+
+	if isEmpty {
+		logging.Info("ClusterQueue '%s' is empty. Applying calculated capacity...", cqName)
+		clusterQueueBytes, err := g.renderClusterQueue()
+		if err != nil {
+			return fmt.Errorf("failed to render clusterqueue with new capacity: %w", err)
+		}
+		if err := g.applyManifests(clusterQueueBytes, "cluster-queue.yaml"); err != nil {
+			return fmt.Errorf("failed to apply clusterqueue with new capacity: %w", err)
+		}
 		return nil
 	}
 
@@ -519,27 +612,27 @@ func (g *GKEOrchestrator) getClusterQueueName(localQueueName string) (string, er
 	return cqName, nil
 }
 
-func (g *GKEOrchestrator) checkClusterQueueCoverage(cqName string) (bool, error) {
+func (g *GKEOrchestrator) checkClusterQueueCoverage(cqName string) (bool, bool, error) {
 	res := g.executor.ExecuteCommand("kubectl", "get", "clusterqueue", cqName, "-o", "json")
 	if res.ExitCode != 0 {
-		return false, fmt.Errorf("failed to get clusterqueue %s: %s", cqName, res.Stderr)
+		return false, false, fmt.Errorf("failed to get clusterqueue %s: %s", cqName, res.Stderr)
 	}
 
 	var cq map[string]interface{}
 	if err := json.Unmarshal([]byte(res.Stdout), &cq); err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	spec, ok := cq["spec"].(map[string]interface{})
 	if !ok {
-		return false, nil
+		return false, true, nil
 	}
 	rgList, ok := spec["resourceGroups"].([]interface{})
 	if !ok || len(rgList) == 0 {
-		return false, nil
+		return false, true, nil
 	}
 
-	return g.hasRequiredResources(rgList), nil
+	return g.hasRequiredResources(rgList), false, nil
 }
 
 func (g *GKEOrchestrator) hasRequiredResources(rgList []interface{}) bool {
@@ -920,7 +1013,11 @@ func (g *GKEOrchestrator) BuildContainerImage(job orchestrator.JobDefinition) (s
 }
 
 func (g *GKEOrchestrator) configureKubectl(clusterName, clusterLocation, projectID string) error {
-	credsRes := g.executor.ExecuteCommand("gcloud", "container", "clusters", "get-credentials", clusterName, "--location", clusterLocation, "--project", projectID)
+	resolvedProject, err := g.getProjectID(projectID)
+	if err != nil {
+		return err
+	}
+	credsRes := g.executor.ExecuteCommand("gcloud", "container", "clusters", "get-credentials", clusterName, "--location", clusterLocation, "--project", resolvedProject)
 	if credsRes.ExitCode != 0 {
 		if strings.Contains(strings.ToLower(credsRes.Stderr), "multiple") || strings.Contains(strings.ToLower(credsRes.Stderr), "ambiguous") {
 			return fmt.Errorf("found multiple GKE clusters named %s. Please specify the exact Zone using --location to disambiguate.", clusterName)
@@ -1034,19 +1131,16 @@ func (g *GKEOrchestrator) indentYaml(s string, indent int) string {
 }
 
 func (g *GKEOrchestrator) determineIfCPUMachine(job orchestrator.JobDefinition) (bool, int, error) {
-	if _, exists := acceleratorShorthandMap[job.AcceleratorType]; exists {
+	if g.isKnownAccelerator(job.AcceleratorType) {
 		return false, 0, nil
 	}
 
-	for _, realMachine := range acceleratorShorthandMap {
-		if job.AcceleratorType == realMachine {
-			return false, 0, nil
-		}
+	isCPU, cpus, err := g.getCPUsFromClusterDesc(job)
+	if err != nil {
+		return false, 0, err
 	}
-
-	mapped := g.GenerateGKENodeSelectorLabel(job.AcceleratorType)
-	if strings.Contains(strings.ToLower(mapped), "nvidia") || isTPUFallback(mapped) {
-		return false, 0, nil
+	if isCPU {
+		return true, cpus, nil
 	}
 
 	if job.ClusterLocation != "" && job.AcceleratorType != "" {
@@ -1061,6 +1155,46 @@ func (g *GKEOrchestrator) determineIfCPUMachine(job orchestrator.JobDefinition) 
 	} else if job.ClusterLocation == "" && job.AcceleratorType != "" {
 		logging.Warn("Zone is empty for machine type %s. Contextually treating it as a CPU machine for dry-run.", job.AcceleratorType)
 		return true, 1, nil
+	}
+	return false, 0, nil
+}
+
+func (g *GKEOrchestrator) isKnownAccelerator(accelType string) bool {
+	if _, exists := acceleratorShorthandMap[accelType]; exists {
+		return true
+	}
+
+	for _, realMachine := range acceleratorShorthandMap {
+		if accelType == realMachine {
+			return true
+		}
+	}
+
+	mapped := g.GenerateGKENodeSelectorLabel(accelType)
+	if strings.Contains(strings.ToLower(mapped), "nvidia") || isTPUFallback(mapped) {
+		return true
+	}
+
+	return false
+}
+
+func (g *GKEOrchestrator) getCPUsFromClusterDesc(job orchestrator.JobDefinition) (bool, int, error) {
+	if job.ClusterLocation == "" || job.AcceleratorType == "" {
+		return false, 0, nil
+	}
+
+	for _, np := range g.clusterDesc.NodePools {
+		if np.Config.MachineType == job.AcceleratorType {
+			cap, err := g.FetchMachineCapabilities(np.Config.MachineType, job.ClusterLocation)
+			if err == nil {
+				guestCpus := cap.GuestCpus
+				if np.Config.AdvancedMachineFeatures.ThreadsPerCore == "1" && !strings.HasPrefix(np.Config.MachineType, "t2a") {
+					guestCpus = guestCpus / 2
+				}
+				logging.Info("Dynamically determined %s is a CPU-only machine from cluster desc, capacity: %d", job.AcceleratorType, guestCpus)
+				return true, guestCpus, nil
+			}
+		}
 	}
 	return false, 0, nil
 }
