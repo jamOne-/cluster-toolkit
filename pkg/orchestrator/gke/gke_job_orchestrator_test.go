@@ -15,10 +15,18 @@
 package gke
 
 import (
+	"context"
+	"fmt"
 	"hpc-toolkit/pkg/orchestrator"
 	"hpc-toolkit/pkg/shell"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 )
 
 type MockExecutor struct {
@@ -1222,5 +1230,155 @@ func TestConfigureClusterEnvironment_AutoCreateQueues(t *testing.T) {
 	// Verify calls
 	if mockExec.callCount["kubectl apply -f"] != 3 {
 		t.Errorf("Expected 3 calls to kubectl apply -f, got %d", mockExec.callCount["kubectl apply -f"])
+	}
+}
+
+func TestCheckSuperSlicingTopology(t *testing.T) {
+	tests := []struct {
+		name        string
+		topology    string
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "Valid 4x4x4",
+			topology:    "4x4x4",
+			expectError: false,
+		},
+		{
+			name:        "Valid uppercase 4X4X4",
+			topology:    "4X4X4",
+			expectError: false,
+		},
+		{
+			name:        "Valid 4x8x8",
+			topology:    "4x8x8",
+			expectError: false,
+		},
+		{
+			name:        "Valid max cubes",
+			topology:    "24x24x16",
+			expectError: false,
+		},
+		{
+			name:        "Valid 16x16x16 (64 cubes)",
+			topology:    "16x16x16",
+			expectError: false,
+		},
+		{
+			name:        "Exceeds max cubes (144)",
+			topology:    "24x24x24", // 6*6*6 = 216 cubes
+			expectError: true,
+			errorMsg:    "exceeds 144",
+		},
+		{
+			name:        "Overflow test",
+			topology:    "1000000000x1000000000x1000000000",
+			expectError: true,
+			errorMsg:    "exceeds 144",
+		},
+		{
+			name:        "Zero dimension",
+			topology:    "0x4x4",
+			expectError: true,
+			errorMsg:    "greater than 0",
+		},
+		{
+			name:        "Negative dimension",
+			topology:    "-4x4x4",
+			expectError: true,
+			errorMsg:    "greater than 0",
+		},
+		{
+			name:        "Not divisible by 4",
+			topology:    "2x4x4",
+			expectError: true,
+			errorMsg:    "divisible by 4",
+		},
+		{
+			name:        "Malformed format",
+			topology:    "4x4",
+			expectError: true,
+			errorMsg:    "invalid super-slicing topology format",
+		},
+		{
+			name:        "Invalid character",
+			topology:    "4x4xA",
+			expectError: true,
+			errorMsg:    "invalid dimension in topology",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkSuperSlicingTopology(tt.topology)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got none")
+				} else if tt.errorMsg != "" && !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("Expected error containing %q, but got %v", tt.errorMsg, err)
+				}
+			} else if err != nil {
+				t.Errorf("Expected no error, but got: %v", err)
+			}
+		})
+	}
+}
+
+type mockDynamicClient struct {
+	dynamic.Interface
+	err error
+}
+
+func (m *mockDynamicClient) Resource(resource schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return &mockNamespaceableResourceInterface{err: m.err}
+}
+
+type mockNamespaceableResourceInterface struct {
+	dynamic.NamespaceableResourceInterface
+	err error
+}
+
+func (m *mockNamespaceableResourceInterface) Get(ctx context.Context, name string, options metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	return nil, m.err
+}
+
+func TestIsSuperSlicingSupported(t *testing.T) {
+	tests := []struct {
+		name           string
+		mockGetErr     error
+		expectedResult bool
+	}{
+		{
+			name:           "Topology exists (supported)",
+			mockGetErr:     nil,
+			expectedResult: true,
+		},
+		{
+			name:           "Topology does not exist (not supported)",
+			mockGetErr:     errors.NewNotFound(schema.GroupResource{Group: "kueue.x-k8s.io", Resource: "topologies"}, "super-slice-topology"),
+			expectedResult: false,
+		},
+		{
+			name:           "Permission denied (not supported)",
+			mockGetErr:     errors.NewForbidden(schema.GroupResource{Group: "kueue.x-k8s.io", Resource: "topologies"}, "super-slice-topology", fmt.Errorf("RBAC error")),
+			expectedResult: false,
+		},
+		{
+			name:           "Other error (not supported)",
+			mockGetErr:     fmt.Errorf("random API error"),
+			expectedResult: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &mockDynamicClient{err: tt.mockGetErr}
+			supported := isSuperSlicingSupported(client)
+
+			if supported != tt.expectedResult {
+				t.Errorf("Expected supported=%v, got %v", tt.expectedResult, supported)
+			}
+		})
 	}
 }

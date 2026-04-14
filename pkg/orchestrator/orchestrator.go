@@ -70,6 +70,7 @@ type JobDefinition struct {
 	ImagePullSecrets   string
 	ServiceAccountName string
 	Topology           string
+	IsSuperSlicing     bool
 	Scheduler          string
 	AwaitJobCompletion bool
 	Timeout            string

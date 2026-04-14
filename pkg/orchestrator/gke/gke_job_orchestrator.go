@@ -175,6 +175,16 @@ func (g *GKEOrchestrator) SubmitJob(job orchestrator.JobDefinition) error {
 		return err
 	}
 
+	if g.dynClient != nil {
+		job.IsSuperSlicing = isSuperSlicingSupported(g.dynClient)
+	}
+
+	if job.IsSuperSlicing && job.Topology != "" {
+		if err := checkSuperSlicingTopology(job.Topology); err != nil {
+			return err
+		}
+	}
+
 	g.grantNodePoolImagePullPermission(job)
 
 	if err := g.validateJobConflicts(job.WorkloadName, job.ClusterName, job.ClusterLocation, job.ProjectID); err != nil {
@@ -1845,4 +1855,44 @@ func (g *GKEOrchestrator) buildTopologyAnnotation(topology string) string {
 		}
 	}
 	return ""
+}
+
+const superSlicingTopologyName = "super-slice-topology"
+
+func checkSuperSlicingTopology(topology string) error {
+	dims := strings.Split(strings.ToLower(topology), "x")
+	if len(dims) != 3 {
+		return fmt.Errorf("invalid super-slicing topology format: %s. Expected format: dim1xdim2xdim3", topology)
+	}
+
+	totalCubes := 1
+	for _, dimStr := range dims {
+		dimStr = strings.TrimSpace(dimStr)
+		dim, err := strconv.Atoi(dimStr)
+		if err != nil {
+			return fmt.Errorf("invalid dimension in topology %s: %w", topology, err)
+		}
+		if dim <= 0 {
+			return fmt.Errorf("invalid dimension %d in topology %s: dimension must be greater than 0", dim, topology)
+		}
+		if dim%4 != 0 {
+			return fmt.Errorf("invalid dimension %d in topology %s: dimension must be divisible by 4", dim, topology)
+		}
+		cubesInDim := dim / 4
+		if cubesInDim > 144 {
+			return fmt.Errorf("invalid topology %s: total number of cubes exceeds 144", topology)
+		}
+		totalCubes *= cubesInDim
+		if totalCubes > 144 {
+			return fmt.Errorf("invalid topology %s: total number of cubes (%d) exceeds 144", topology, totalCubes)
+		}
+	}
+
+	return nil
+}
+
+func isSuperSlicingSupported(client dynamic.Interface) bool {
+	gvr := schema.GroupVersionResource{Group: "kueue.x-k8s.io", Version: "v1beta1", Resource: "topologies"}
+	_, err := client.Resource(gvr).Get(context.TODO(), superSlicingTopologyName, metav1.GetOptions{})
+	return err == nil
 }
