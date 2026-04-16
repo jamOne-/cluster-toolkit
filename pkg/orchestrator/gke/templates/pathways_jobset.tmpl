@@ -82,10 +82,23 @@ spec:
           metadata:
             labels:
               gcluster.google.com/workload: {{.WorkloadName}}
+{{- if or (and .TopologyAnnotation (not .IsSuperSlicing)) .GCSFuseEnabled }}
             annotations:
+{{- if and .TopologyAnnotation (not .IsSuperSlicing) }}
+{{.TopologyAnnotation}}
+{{- end }}
+{{- if .GCSFuseEnabled }}
               gke-gcsfuse/volumes: "true"
+{{- end }}
+{{- end }}
           spec:
             restartPolicy: Never
+{{- if not .IsSuperSlicing }}
+{{- if .NodeSelector }}
+            nodeSelector:
+{{.NodeSelector}}
+{{- end }}
+{{- end }}
             containers:
             - name: pathways-worker
               image: {{.Pathways.WorkerImage}}

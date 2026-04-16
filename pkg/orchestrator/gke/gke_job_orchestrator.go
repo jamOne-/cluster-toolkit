@@ -1101,6 +1101,7 @@ func (g *GKEOrchestrator) prepareJobSetTemplateData(opts ManifestOptions, update
 		VolumesYAML             string
 		VolumeMountsYAML        string
 		GCSFuseEnabled          bool
+		IsSuperSlicing          bool
 		Pathways                orchestrator.PathwaysJobDefinition
 	}{
 		WorkloadName:            opts.WorkloadName,
@@ -1124,6 +1125,7 @@ func (g *GKEOrchestrator) prepareJobSetTemplateData(opts ManifestOptions, update
 		VolumesYAML:             opts.VolumesYAML,
 		VolumeMountsYAML:        opts.VolumeMountsYAML,
 		GCSFuseEnabled:          opts.GCSFuseEnabled,
+		IsSuperSlicing:          opts.IsSuperSlicing,
 		Pathways:                opts.Pathways,
 	}
 }

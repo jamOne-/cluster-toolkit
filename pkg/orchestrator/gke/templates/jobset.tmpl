@@ -25,9 +25,9 @@ spec:
             metadata:
               labels:
                 gcluster.google.com/workload: {{.WorkloadName}}
-{{- if or .TopologyAnnotation .GCSFuseEnabled }}
+{{- if or (and .TopologyAnnotation (not .IsSuperSlicing)) .GCSFuseEnabled }}
               annotations:
-{{- if .TopologyAnnotation }}
+{{- if and .TopologyAnnotation (not .IsSuperSlicing) }}
 {{.TopologyAnnotation}}
 {{- end }}
 {{- if .GCSFuseEnabled }}
@@ -54,9 +54,11 @@ spec:
               - name: temp-storage
                 emptyDir: {}
 {{.VolumesYAML}}
+{{- if not .IsSuperSlicing }}
 {{- if .NodeSelector }}
               nodeSelector:
 {{.NodeSelector}}
+{{- end }}
 {{- end }}
 {{- if .Affinity }}
               affinity:

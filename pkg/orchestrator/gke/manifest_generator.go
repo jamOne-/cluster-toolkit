@@ -182,6 +182,7 @@ func (g *GKEOrchestrator) PrepareManifestOptions(job orchestrator.JobDefinition,
 		Tolerations:             tolerationsStr,
 		AwaitJobCompletion:      job.AwaitJobCompletion,
 		PriorityClassName:       job.PriorityClassName,
+		IsSuperSlicing:          isSuperSlicing,
 		Topology:                schedOpts.Topology,
 		Verbose:                 job.Verbose,
 	}
