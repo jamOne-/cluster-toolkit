@@ -175,16 +175,6 @@ func (g *GKEOrchestrator) SubmitJob(job orchestrator.JobDefinition) error {
 		return err
 	}
 
-	if g.dynClient != nil {
-		job.IsSuperSlicing = isSuperSlicingSupported(g.dynClient)
-	}
-
-	if job.IsSuperSlicing && job.Topology != "" {
-		if err := checkSuperSlicingTopology(job.Topology); err != nil {
-			return err
-		}
-	}
-
 	g.grantNodePoolImagePullPermission(job)
 
 	if err := g.validateJobConflicts(job.WorkloadName, job.ClusterName, job.ClusterLocation, job.ProjectID); err != nil {
@@ -207,6 +197,12 @@ func (g *GKEOrchestrator) SubmitJob(job orchestrator.JobDefinition) error {
 	manifestOpts, profile, err := g.PrepareManifestOptions(job, fullImageName)
 	if err != nil {
 		return err
+	}
+
+	if manifestOpts.IsSuperSlicing && manifestOpts.Topology != "" {
+		if err := checkSuperSlicingTopology(manifestOpts.Topology); err != nil {
+			return err
+		}
 	}
 
 	err = g.generateAndApplyManifest(manifestOpts, profile, job.OutputManifest)
@@ -263,6 +259,12 @@ func (g *GKEOrchestrator) GeneratePathwaysManifest(job orchestrator.JobDefinitio
 	opts, _, err := g.PrepareManifestOptions(job, fullImageName)
 	if err != nil {
 		return "", err
+	}
+
+	if opts.IsSuperSlicing && opts.Topology != "" {
+		if err := checkSuperSlicingTopology(opts.Topology); err != nil {
+			return "", err
+		}
 	}
 
 	opts.Pathways = job.Pathways
@@ -793,12 +795,12 @@ func (g *GKEOrchestrator) resolveTopologyForChips(prefix string, totalChips int)
 	return "", fmt.Errorf("could not find a valid topology shape for %d chips with prefix %s", totalChips, prefix)
 }
 
-func (g *GKEOrchestrator) resolveTopology(requested string, accelType string, clusterName string, clusterLocation string) (string, error) {
+func (g *GKEOrchestrator) resolveTopology(requested string, accelType string, clusterName string, clusterLocation string, isSuperSlicing bool) (string, error) {
 	if !strings.Contains(strings.ToLower(accelType), "tpu") {
 		return "", nil // Rejects GPU topologies implicitly
 	}
 
-	top, handled, err := g.resolveSuperSlicingTopology(requested, clusterName, clusterLocation, accelType)
+	top, handled, err := g.resolveSuperSlicingTopology(requested, clusterName, clusterLocation, accelType, isSuperSlicing)
 	if err != nil {
 		return "", err
 	}
@@ -875,17 +877,8 @@ func (g *GKEOrchestrator) validateRequestedTopology(requested string, topologies
 	return nil
 }
 
-func (g *GKEOrchestrator) resolveSuperSlicingTopology(requested string, clusterName string, clusterLocation string, accelType string) (string, bool, error) {
-	// This function should work only for TPU 7x
-	if !strings.Contains(accelType, "tpu7x") {
-		return "", false, nil
-	}
-
-	if active, _ := g.verifySuperSlicingActive(ManifestOptions{
-		ClusterName:     clusterName,
-		ClusterLocation: clusterLocation,
-		AcceleratorType: accelType,
-	}); active {
+func (g *GKEOrchestrator) resolveSuperSlicingTopology(requested string, clusterName string, clusterLocation string, accelType string, isSuperSlicing bool) (string, bool, error) {
+	if isSuperSlicing {
 		logging.Info("Super-slicing detected. Skipping strict physical state queries for topology.")
 		if requested != "" {
 			dims := strings.Split(requested, "x")
@@ -1102,6 +1095,7 @@ func (g *GKEOrchestrator) prepareJobSetTemplateData(opts ManifestOptions, update
 		VolumeMountsYAML        string
 		GCSFuseEnabled          bool
 		IsSuperSlicing          bool
+		Topology                string
 		Pathways                orchestrator.PathwaysJobDefinition
 	}{
 		WorkloadName:            opts.WorkloadName,
@@ -1126,6 +1120,7 @@ func (g *GKEOrchestrator) prepareJobSetTemplateData(opts ManifestOptions, update
 		VolumeMountsYAML:        opts.VolumeMountsYAML,
 		GCSFuseEnabled:          opts.GCSFuseEnabled,
 		IsSuperSlicing:          opts.IsSuperSlicing,
+		Topology:                opts.Topology,
 		Pathways:                opts.Pathways,
 	}
 }
@@ -1891,10 +1886,4 @@ func checkSuperSlicingTopology(topology string) error {
 	}
 
 	return nil
-}
-
-func isSuperSlicingSupported(client dynamic.Interface) bool {
-	gvr := schema.GroupVersionResource{Group: "kueue.x-k8s.io", Version: "v1beta1", Resource: "topologies"}
-	_, err := client.Resource(gvr).Get(context.TODO(), superSlicingTopologyName, metav1.GetOptions{})
-	return err == nil
 }

@@ -25,10 +25,13 @@ spec:
             metadata:
               labels:
                 gcluster.google.com/workload: {{.WorkloadName}}
-{{- if or (and .TopologyAnnotation (not .IsSuperSlicing)) .GCSFuseEnabled }}
+{{- if or (and .TopologyAnnotation (not .IsSuperSlicing)) .IsSuperSlicing .GCSFuseEnabled }}
               annotations:
 {{- if and .TopologyAnnotation (not .IsSuperSlicing) }}
 {{.TopologyAnnotation}}
+{{- end }}
+{{- if .IsSuperSlicing }}
+                cloud.google.com/gke-tpu-slice-topology: {{.Topology}}
 {{- end }}
 {{- if .GCSFuseEnabled }}
                 gke-gcsfuse/volumes: "true"
@@ -54,11 +57,9 @@ spec:
               - name: temp-storage
                 emptyDir: {}
 {{.VolumesYAML}}
-{{- if not .IsSuperSlicing }}
 {{- if .NodeSelector }}
               nodeSelector:
 {{.NodeSelector}}
-{{- end }}
 {{- end }}
 {{- if .Affinity }}
               affinity:

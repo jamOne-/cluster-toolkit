@@ -9,121 +9,122 @@ spec:
   failurePolicy:
     maxRestarts: {{.MaxRestarts}}
   replicatedJobs:
-  - name: pathways-head
-    replicas: 1
-    template:
-      spec:
-        parallelism: 1
-        completions: 1
-        backoffLimit: 0
-        template:
-          metadata:
-            labels:
-              cloud.google.com/gke-nodepool: cpu-np
+    - name: pathways-head
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                cloud.google.com/gke-nodepool: cpu-np
 {{- if .GCSFuseEnabled }}
-            annotations:
-              gke-gcsfuse/volumes: "true"
+              annotations:
+                gke-gcsfuse/volumes: "true"
 {{- end }}
-          spec:
-            restartPolicy: Never
-            containers:
-            - name: pathways-proxy
-              image: {{.Pathways.ProxyServerImage}}
-              args:
-              - --gcs_location={{.Pathways.GCSLocation}}
-              - --cluster_name={{.ClusterName}}
-              - --project_id={{.ProjectID}}
-              {{- if .Pathways.ProxyArgs}}
-              - {{.Pathways.ProxyArgs}}
-              {{- end}}
-            - name: pathways-rm
-              image: {{.Pathways.ServerImage}}
-              args:
-              {{- if .Pathways.ServerArgs}}
-              - {{.Pathways.ServerArgs}}
-              {{- end}}
-            {{- if not .Pathways.Headless}}
-            - name: workload-container
-              image: {{.FullImageName}}
-              command:
-              - "/bin/bash"
-              - "-c"
-              - |
-                {{.CommandToRun}}
-              volumeMounts:
-              - name: dshm
-                mountPath: /dev/shm
+            spec:
+              restartPolicy: Never
+              containers:
+              - name: pathways-proxy
+                image: {{.Pathways.ProxyServerImage}}
+                args:
+                - --gcs_location={{.Pathways.GCSLocation}}
+                - --cluster_name={{.ClusterName}}
+                - --project_id={{.ProjectID}}
+                {{- if .Pathways.ProxyArgs}}
+                - {{.Pathways.ProxyArgs}}
+                {{- end}}
+              - name: pathways-rm
+                image: {{.Pathways.ServerImage}}
+                args:
+                {{- if .Pathways.ServerArgs}}
+                - {{.Pathways.ServerArgs}}
+                {{- end}}
+              {{- if not .Pathways.Headless}}
+              - name: workload-container
+                image: {{.FullImageName}}
+                command:
+                - "/bin/bash"
+                - "-c"
+                - |
+                  {{.CommandToRun}}
+                volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
 {{.VolumeMountsYAML}}
-            {{- end}}
-            {{- if .Pathways.ColocatedPythonSidecarImage}}
-            - name: python-sidecar
-              image: {{.Pathways.ColocatedPythonSidecarImage}}
-            {{- end}}
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
+              {{- end}}
+              {{- if .Pathways.ColocatedPythonSidecarImage}}
+              - name: python-sidecar
+                image: {{.Pathways.ColocatedPythonSidecarImage}}
+              {{- end}}
+              volumes:
+              - name: dshm
+                emptyDir:
+                  medium: Memory
 {{.VolumesYAML}}
-  - name: worker
-    replicas: {{.NumSlices}}
-    template:
-      spec:
-        parallelism: {{.VmsPerSlice}}
-        completions: {{.VmsPerSlice}}
-        backoffLimit: 0
-        podFailurePolicy:
-          rules:
-          - action: FailJob
-            onExitCodes:
-              containerName: "workload-container"
-              operator: In
-              values: [1]
-        template:
-          metadata:
-            labels:
-              gcluster.google.com/workload: {{.WorkloadName}}
-{{- if or (and .TopologyAnnotation (not .IsSuperSlicing)) .GCSFuseEnabled }}
-            annotations:
+    - name: worker
+      replicas: {{.NumSlices}}
+      template:
+        spec:
+          parallelism: {{.VmsPerSlice}}
+          completions: {{.VmsPerSlice}}
+          backoffLimit: 0
+          podFailurePolicy:
+            rules:
+            - action: FailJob
+              onExitCodes:
+                containerName: "workload-container"
+                operator: In
+                values: [1]
+          template:
+            metadata:
+              labels:
+                gcluster.google.com/workload: {{.WorkloadName}}
+{{- if or (and .TopologyAnnotation (not .IsSuperSlicing)) .IsSuperSlicing .GCSFuseEnabled }}
+              annotations:
 {{- if and .TopologyAnnotation (not .IsSuperSlicing) }}
 {{.TopologyAnnotation}}
 {{- end }}
+{{- if .IsSuperSlicing }}
+                cloud.google.com/gke-tpu-slice-topology: {{.Topology}}
+{{- end }}
 {{- if .GCSFuseEnabled }}
-              gke-gcsfuse/volumes: "true"
+                gke-gcsfuse/volumes: "true"
 {{- end }}
 {{- end }}
-          spec:
-            restartPolicy: Never
-{{- if not .IsSuperSlicing }}
+            spec:
+              restartPolicy: Never
 {{- if .NodeSelector }}
-            nodeSelector:
+              nodeSelector:
 {{.NodeSelector}}
 {{- end }}
-{{- end }}
-            containers:
-            - name: pathways-worker
-              image: {{.Pathways.WorkerImage}}
-              args:
-                - --cluster_name={{.ClusterName}}
-                - --project_id={{.ProjectID}}
-                {{- if .Pathways.WorkerArgs}}
-                - {{.Pathways.WorkerArgs}}
-                {{- end}}
-              volumeMounts:
-              - name: dshm
-                mountPath: /dev/shm
-            - name: workload-container
-              image: {{.FullImageName}}
-              command:
-              - "/bin/bash"
-              - "-c"
-              - |
-                {{.CommandToRun}}
-              volumeMounts:
-              - name: dshm
-                mountPath: /dev/shm
+              containers:
+              - name: pathways-worker
+                image: {{.Pathways.WorkerImage}}
+                args:
+                  - --cluster_name={{.ClusterName}}
+                  - --project_id={{.ProjectID}}
+                  {{- if .Pathways.WorkerArgs}}
+                  - {{.Pathways.WorkerArgs}}
+                  {{- end}}
+                volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+              - name: workload-container
+                image: {{.FullImageName}}
+                command:
+                - "/bin/bash"
+                - "-c"
+                - |
+                  {{.CommandToRun}}
+                volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
 {{.VolumeMountsYAML}}
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
+              volumes:
+              - name: dshm
+                emptyDir:
+                  medium: Memory
 {{.VolumesYAML}}

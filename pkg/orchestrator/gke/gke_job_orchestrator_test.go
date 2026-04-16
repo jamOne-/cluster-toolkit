@@ -15,14 +15,14 @@
 package gke
 
 import (
+	"bytes"
 	"context"
-	"fmt"
 	"hpc-toolkit/pkg/orchestrator"
 	"hpc-toolkit/pkg/shell"
 	"strings"
 	"testing"
+	"text/template"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -1343,42 +1343,106 @@ func (m *mockNamespaceableResourceInterface) Get(ctx context.Context, name strin
 	return nil, m.err
 }
 
-func TestIsSuperSlicingSupported(t *testing.T) {
-	tests := []struct {
-		name           string
-		mockGetErr     error
-		expectedResult bool
-	}{
-		{
-			name:           "Topology exists (supported)",
-			mockGetErr:     nil,
-			expectedResult: true,
-		},
-		{
-			name:           "Topology does not exist (not supported)",
-			mockGetErr:     errors.NewNotFound(schema.GroupResource{Group: "kueue.x-k8s.io", Resource: "topologies"}, "super-slice-topology"),
-			expectedResult: false,
-		},
-		{
-			name:           "Permission denied (not supported)",
-			mockGetErr:     errors.NewForbidden(schema.GroupResource{Group: "kueue.x-k8s.io", Resource: "topologies"}, "super-slice-topology", fmt.Errorf("RBAC error")),
-			expectedResult: false,
-		},
-		{
-			name:           "Other error (not supported)",
-			mockGetErr:     fmt.Errorf("random API error"),
-			expectedResult: false,
+func TestGenerateGKEManifest_SuperSlicing(t *testing.T) {
+	orc := NewGKEOrchestrator()
+	opts := ManifestOptions{
+		WorkloadName:    "test-ss-workload",
+		FullImageName:   "test-image:latest",
+		CommandToRun:    "python app.py",
+		AcceleratorType: "tpu7x",
+		IsSuperSlicing:  true,
+		Topology:        "4x4x4",
+		NodeSelector:    "                cloud.google.com/gke-tpu-accelerator: tpu7x",
+	}
+
+	manifest, err := orc.GenerateGKEManifest(opts, JobProfile{})
+	if err != nil {
+		t.Fatalf("GenerateGKEManifest failed: %v", err)
+	}
+
+	// Assert the presence of the Super-slicing annotation.
+	expectedAnnotation := "cloud.google.com/gke-tpu-slice-topology: 4x4x4"
+	if !strings.Contains(manifest, expectedAnnotation) {
+		t.Errorf("manifest missing expected Super-slicing annotation %q\nManifest: %s", expectedAnnotation, manifest)
+	}
+
+	// Assert that nodeSelector contains accelerator but NOT topology.
+	if !strings.Contains(manifest, "nodeSelector:") {
+		t.Errorf("manifest missing expected nodeSelector: for Super-slicing job\nManifest: %s", manifest)
+	}
+	if !strings.Contains(manifest, "cloud.google.com/gke-tpu-accelerator: tpu7x") {
+		t.Errorf("manifest nodeSelector missing accelerator label\nManifest: %s", manifest)
+	}
+	if strings.Contains(manifest, "cloud.google.com/gke-tpu-topology:") {
+		t.Errorf("manifest nodeSelector should NOT contain topology label for Super-slicing job\nManifest: %s", manifest)
+	}
+}
+
+func TestGeneratePathwaysManifest_SuperSlicing(t *testing.T) {
+	opts := ManifestOptions{
+		WorkloadName:    "pathways-ss-test",
+		FullImageName:   "test-image:latest",
+		CommandToRun:    "python app.py",
+		AcceleratorType: "tpu7x",
+		IsSuperSlicing:  true,
+		Topology:        "4x4x4",
+		NodeSelector:    "                cloud.google.com/gke-tpu-accelerator: tpu7x",
+		Pathways: orchestrator.PathwaysJobDefinition{
+			ProxyServerImage: "proxy:latest",
+			ServerImage:      "server:latest",
+			WorkerImage:      "worker:latest",
+			GCSLocation:      "gs://my-bucket",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := &mockDynamicClient{err: tt.mockGetErr}
-			supported := isSuperSlicingSupported(client)
+	tmpl, err := template.ParseFS(templatesFS, "templates/pathways_jobset.tmpl")
+	if err != nil {
+		t.Fatalf("failed to parse pathways template: %v", err)
+	}
 
-			if supported != tt.expectedResult {
-				t.Errorf("Expected supported=%v, got %v", tt.expectedResult, supported)
-			}
-		})
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, opts); err != nil {
+		t.Fatalf("failed to execute pathways template: %v", err)
+	}
+	manifest := buf.String()
+
+	// Assert the presence of the Super-slicing annotation in worker.
+	expectedAnnotation := "cloud.google.com/gke-tpu-slice-topology: 4x4x4"
+	if !strings.Contains(manifest, expectedAnnotation) {
+		t.Errorf("manifest missing expected Super-slicing annotation %q\nManifest: %s", expectedAnnotation, manifest)
+	}
+
+	// Assert that nodeSelector is present in worker.
+	if !strings.Contains(manifest, "nodeSelector:") {
+		t.Errorf("manifest missing expected nodeSelector: for Super-slicing job\nManifest: %s", manifest)
+	}
+}
+
+func TestGenerateGKEManifest_Standard(t *testing.T) {
+	orc := NewGKEOrchestrator()
+	opts := ManifestOptions{
+		WorkloadName:    "test-std-workload",
+		FullImageName:   "test-image:latest",
+		CommandToRun:    "python app.py",
+		AcceleratorType: "tpu-v6e-slice",
+		IsSuperSlicing:  false,
+		Topology:        "4x4x4",
+		NodeSelector:    "                cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice",
+	}
+
+	manifest, err := orc.GenerateGKEManifest(opts, JobProfile{})
+	if err != nil {
+		t.Fatalf("GenerateGKEManifest failed: %v", err)
+	}
+
+	// Assert the absence of the Super-slicing annotation.
+	unexpectedAnnotation := "cloud.google.com/gke-tpu-slice-topology: 4x4x4"
+	if strings.Contains(manifest, unexpectedAnnotation) {
+		t.Errorf("manifest should not contain Super-slicing annotation %q for standard job\nManifest: %s", unexpectedAnnotation, manifest)
+	}
+
+	// Assert the presence of the nodeSelector block.
+	if !strings.Contains(manifest, "nodeSelector:") {
+		t.Errorf("manifest missing expected nodeSelector: for standard job\nManifest: %s", manifest)
 	}
 }

@@ -183,14 +183,18 @@ func (g *GKEOrchestrator) verifySuperSlicingActive(opts ManifestOptions) (bool, 
 		return false, nil
 	}
 
+	var isProvisionOnly bool
 	var policy map[string]interface{}
 	if err := json.Unmarshal([]byte(result.Stdout), &policy); err == nil {
 		if placement, ok := policy["placementPolicy"].(map[string]interface{}); ok {
 			if mode, ok := placement["acceleratorTopologyMode"].(string); ok && mode == "PROVISION_ONLY" {
-				logging.Info("Super-slicing PROVISION_ONLY mode detected for node pool %s.", poolName)
-				return true, nil
+				isProvisionOnly = true
 			}
 		}
+	}
+
+	if !isProvisionOnly {
+		return false, nil
 	}
 
 	// Check for topologies.kueue.x-k8s.io and AdmissionCheck
@@ -200,6 +204,7 @@ func (g *GKEOrchestrator) verifySuperSlicingActive(opts ManifestOptions) (bool, 
 		return false, nil
 	}
 
+	logging.Info("Super-slicing active: PROVISION_ONLY mode detected and Topology CRD present.")
 	return true, nil
 }
 

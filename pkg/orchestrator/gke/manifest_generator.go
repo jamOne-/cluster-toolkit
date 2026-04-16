@@ -104,6 +104,17 @@ func (g *GKEOrchestrator) PrepareManifestOptions(job orchestrator.JobDefinition,
 		return ManifestOptions{}, JobProfile{}, err
 	}
 
+	// Determine if Super-slicing is active based on cluster state and job requirements.
+	isSuperSlicing, err := g.verifySuperSlicingActive(ManifestOptions{
+		ClusterName:     job.ClusterName,
+		ClusterLocation: job.ClusterLocation,
+		AcceleratorType: job.AcceleratorType,
+	})
+	if err != nil {
+		return ManifestOptions{}, JobProfile{}, err
+	}
+	job.IsSuperSlicing = isSuperSlicing
+
 	schedOpts := SchedulingOptions{
 		PlacementPolicy:    job.PlacementPolicy,
 		NodeAffinityLabels: job.NodeSelector,
@@ -112,19 +123,13 @@ func (g *GKEOrchestrator) PrepareManifestOptions(job orchestrator.JobDefinition,
 	}
 
 	mappedLabel := g.GenerateGKENodeSelectorLabel(job.AcceleratorType)
-	topology, err := g.resolveTopology(job.Topology, mappedLabel, job.ClusterName, job.ClusterLocation)
+	topology, err := g.resolveTopology(job.Topology, mappedLabel, job.ClusterName, job.ClusterLocation, isSuperSlicing)
 	if err != nil {
 		return ManifestOptions{}, JobProfile{}, err
 	}
 	schedOpts.Topology = topology
 
 	g.dynamicallyCalculateVmsPerSlice(&job, topology, mappedLabel)
-
-	isSuperSlicing, _ := g.verifySuperSlicingActive(ManifestOptions{
-		ClusterName:     job.ClusterName,
-		ClusterLocation: job.ClusterLocation,
-		AcceleratorType: job.AcceleratorType,
-	})
 
 	isCPUMachine, capacity, err := g.determineIfCPUMachine(job)
 	if err != nil {
